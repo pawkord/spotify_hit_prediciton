@@ -1,0 +1,165 @@
+---
+title: "Predicting Spotify Track Commercial Success using Random Forest"
+author: "Paweł Kordowski"
+date: "2026-01-15"
+output:
+  pdf_document:
+    toc: true            
+    toc_depth: 2         
+    number_sections: true
+    highlight: tango
+---
+
+data:https://www.kaggle.com/datasets/maharshipandya/-spotify-tracks-dataset
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+# Package load
+```{r}
+library(caret)
+library(tidyverse)
+library(doParallel)
+library(knitr)
+library(rsample)
+library(vip)
+library(pROC)
+library(kableExtra)
+```
+# Data load
+```{r}
+df <- read_csv("dataset.csv")
+```
+# Enabling parallel processing
+```{r}
+n_cores <- detectCores()
+cl <- makePSOCKcluster(n_cores)
+registerDoParallel(cl)
+```
+# Dataset breakdown
+```{r}
+summary(df)
+spec(df)
+df %>% 
+  is.na() %>% 
+  colSums()
+```
+# Popularity threshold
+A threshold of 50 was adopted, defining a 'Hit' as a track in the upper quartile of popularity (Top 25%).
+```{r}
+threshold <- 50
+```
+# Deleting unnecessary variables and transformation
+```{r}
+df <- df %>% 
+  select(popularity,
+         danceability,
+         energy,
+         loudness,
+         speechiness,
+         acousticness, 
+         instrumentalness, 
+         liveness, 
+         valence, 
+         tempo, 
+         duration_ms, 
+         explicit, 
+         mode, 
+         key,
+         time_signature) %>%
+  mutate(is_popular=ifelse(
+    popularity>threshold,
+    "Yes",
+    "No"
+  )) %>% 
+  select(-popularity) %>% 
+  mutate(
+    is_popular=as.factor(is_popular),
+    explicit=as.factor(explicit)
+)
+```
+# Train and test split
+```{r}
+set.seed(42)
+train_test_split <- initial_split(
+  data = df,
+  prop = 0.7
+)
+df_train <- training(train_test_split)
+df_test <- testing(train_test_split)
+```
+# Model training
+```{r}
+ctrl <- trainControl(
+  method = "cv",
+  number = 5, 
+  classProbs = TRUE, 
+  summaryFunction = twoClassSummary
+)
+
+model <- train(
+  form = is_popular~.,
+  data = df_train,
+  method = "rf",
+  trControl = ctrl,
+  metric = "ROC",
+  ntree = 200
+)
+```
+# Predicition
+```{r}
+prob <- predict(
+  object = model,
+  newdata = df_test,
+  type = "prob"
+)[,2]
+
+treshold_rf <- 0.5
+
+pred <- ifelse(
+  prob>treshold_rf,
+  "Yes",
+  "No"
+)%>% as.factor()
+
+roc_rf <- roc(
+  response = df_test$is_popular,
+  predictor = prob
+)
+plot(roc_rf)
+roc_rf$auc
+
+vi(model)
+vip(model)
+```
+The model achieved an AUC score of 0.8552. This indicates that the classifier has a high discriminative ability.
+
+The model correctly identifies most popular tracks, confirming the hypothesis that commercial success largely depends on measurable technical parameters of the track, rather than just random factors.
+
+# Hit profile
+
+The 5 most influential parameters were selected.
+```{r}
+hit_profile <- df %>% 
+  filter(is_popular=="Yes") %>% 
+  summarise(
+    mean_valence=mean(valence),
+    mean_duration=mean(duration_ms)/60000, # to display in minutes
+    mean_loudness=mean(loudness),
+    mean_acousticness=mean(acousticness),
+    mean_tempo=mean(tempo)
+)
+
+hit_profile %>% 
+  kbl(
+    caption = "Hit Profile",
+    booktabs = T
+  ) %>% 
+  kable_styling(
+    latex_options = c(
+      "striped",
+      "hold_position"),
+    position = "center"
+)
+```
+The HIT profile reveals that tracks more prone to becoming popular tend to convey sadness or anger (lower valence), last slightly over 3.5 minutes, have a loudness of just under -8 dB, are generally not acoustic, and maintain a tempo of around 121 BPM.
